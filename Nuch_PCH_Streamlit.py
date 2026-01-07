@@ -6,7 +6,7 @@ import urllib.parse
 
 # --- НАСТРОЙКИ ---
 # Убедитесь, что ссылка ведет на RAW файл (начинается с raw.githubusercontent.com)
-URL_STRUCT = "https://raw.githubusercontent.com/ВАШ_ЛОГИН/РЕПО/main/adm_struktur.xlsx"
+URL_STRUCT = "https://github.com/denmalysheff/Nuch/blob/main/adm_struktur.xlsx"
 
 @st.cache_data
 def load_admin_structure(url):
@@ -35,3 +35,4 @@ def load_admin_structure(url):
     except Exception as e:
         st.error(f"Критическая ошибка загрузки справочника: {e}")
         return None
+
