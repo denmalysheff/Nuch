@@ -3,8 +3,9 @@ import pandas as pd
 import io
 import requests
 import urllib.parse
+import plotly.express as px
 
-# --- НАСТРОЙКИ ---
+# --- КОНФИГУРАЦИЯ ---
 URL_STRUCT = "https://raw.githubusercontent.com/denmalysheff/Nuch/refs/heads/main/adm_struktur.xlsx"
 
 st.set_page_config(page_title="Аналитика ПЧ-22", layout="wide")
@@ -12,6 +13,7 @@ st.set_page_config(page_title="Аналитика ПЧ-22", layout="wide")
 @st.cache_data
 def load_admin_structure(url):
     try:
+        # Исправление ссылки Raw GitHub
         url = url.replace("Nuch/raw/refs", "Nuch/refs")
         parsed_url = list(urllib.parse.urlparse(url))
         parsed_url[2] = urllib.parse.quote(parsed_url[2])
@@ -23,22 +25,44 @@ def load_admin_structure(url):
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
         df.columns = [col.strip().upper() for col in df.columns]
         
+        # Расчет длины из справочника
         if 'КМКОН' in df.columns and 'КМНАЧ' in df.columns:
             df['ПЛАН_ДЛИНА'] = abs(df['КМКОН'] - df['КМНАЧ'])
         return df
     except Exception as e:
-        st.error(f"❌ Ошибка справочника: {e}")
+        st.error(f"❌ Ошибка справочника GitHub: {e}")
         return None
 
-def get_nuch_val(row):
-    """Функция расчета Nуч для строки агрегированных данных"""
-    total = row['ПРОВЕРЕНО']
-    if total == 0: return 0
-    # Расчет: (5*отл + 4*хор + 3*удов - 5*неуд) / всего
-    val = (row['ОТЛ']*5 + row['ХОР']*4 + row['УДОВ']*3 - row['НЕУД']*5) / total
-    return round(val, 2)
+def calculate_nuch_full(group_name, group_data, level, plan_km=0):
+    """Единая функция расчета качества и полноты"""
+    fact_km = group_data["ПРОВЕРЕНО"].sum()
+    
+    # Категории километров
+    km_5 = group_data[group_data["ОЦЕНКА"] == 5]["ПРОВЕРЕНО"].sum()
+    km_4 = group_data[group_data["ОЦЕНКА"] == 4]["ПРОВЕРЕНО"].sum()
+    km_3 = group_data[group_data["ОЦЕНКА"] == 3]["ПРОВЕРЕНО"].sum()
+    km_2 = group_data[group_data["ОЦЕНКА"] == 2]["ПРОВЕРЕНО"].sum()
 
-st.title("📊 Аналитика ПЧ: Полнота и Качество (Nуч)")
+    n_uch = 0
+    if fact_km > 0:
+        n_uch = (km_5*5 + km_4*4 + km_3*3 - km_2*5) / fact_km
+
+    return {
+        "Уровень": level,
+        "Группа": group_name,
+        "Nуч": round(n_uch, 2),
+        "Проверено (км)": round(fact_km, 3),
+        "План (км)": round(plan_km, 3),
+        "Полнота %": round((fact_km / plan_km * 100), 1) if plan_km > 0 else 0,
+        "Отл": round(km_5, 3),
+        "Хор": round(km_4, 3),
+        "Удов": round(km_3, 3),
+        "Неуд": round(km_2, 3)
+    }
+
+# --- ИНТЕРФЕЙС ---
+st.title("📊 Единая аналитика ПЧ-22: Качество и Полнота")
+st.markdown("---")
 
 df_struct = load_admin_structure(URL_STRUCT)
 
@@ -48,81 +72,85 @@ if df_struct is not None:
     
     if uploaded_file:
         try:
-            df_eval = pd.read_excel(uploaded_file, sheet_name="Оценка КМ")
-            df_eval.columns = [col.strip().upper() for col in df_eval.columns]
-
-            # --- 1. ПОДГОТОВКА ПЛАНА ---
-            df_struct['НАПРАВЛЕНИЕ'] = df_struct['НАПРАВЛЕНИЕ'].astype(str)
-            df_struct['ПУТЬ'] = df_struct['ПУТЬ'].astype(str)
-            plan_grouped = df_struct.groupby(['НАПРАВЛЕНИЕ', 'ПУТЬ', 'ПД'])['ПЛАН_ДЛИНА'].sum().reset_index()
-
-            # --- 2. ПОДГОТОВКА ФАКТА И КАЧЕСТВА ---
-            df_eval['КОДНАПР'] = df_eval['КОДНАПР'].astype(str)
-            df_eval['ПУТЬ'] = df_eval['ПУТЬ'].astype(str)
+            # 1. Загрузка данных оценки
+            df_raw = pd.read_excel(uploaded_file, sheet_name="Оценка КМ")
+            df_raw.columns = [col.strip().upper() for col in df_raw.columns]
             
-            # Считаем километры по оценкам для каждой группы
-            df_eval['ОТЛ'] = df_eval.apply(lambda r: r['ПРОВЕРЕНО'] if r['ОЦЕНКА'] == 5 else 0, axis=1)
-            df_eval['ХОР'] = df_eval.apply(lambda r: r['ПРОВЕРЕНО'] if r['ОЦЕНКА'] == 4 else 0, axis=1)
-            df_eval['УДОВ'] = df_eval.apply(lambda r: r['ПРОВЕРЕНО'] if r['ОЦЕНКА'] == 3 else 0, axis=1)
-            df_eval['НЕУД'] = df_eval.apply(lambda r: r['ПРОВЕРЕНО'] if r['ОЦЕНКА'] == 2 else 0, axis=1)
+            # Фильтрация по направлениям (как в ваших исходных кодах)
+            main_codes = ['24701', '24602', '24603']
+            df_eval = df_raw[df_raw["КОДНАПР"].astype(str).isin(main_codes)].copy()
 
-            fact_grouped = df_eval.groupby(['КОДНАПР', 'ПУТЬ', 'ПД']).agg({
-                'ПРОВЕРЕНО': 'sum',
-                'ОТЛ': 'sum',
-                'ХОР': 'sum',
-                'УДОВ': 'sum',
-                'НЕУД': 'sum'
-            }).reset_index()
+            # 2. Подготовка плана из справочника
+            # Считаем сумму КМ для каждого ПД (все пути суммарно)
+            pd_plan_map = df_struct.groupby('ПД')['ПЛАН_ДЛИНА'].sum().to_dict()
 
-            # --- 3. СЛИЯНИЕ ---
-            summary = plan_grouped.merge(
-                fact_grouped, 
-                left_on=['НАПРАВЛЕНИЕ', 'ПУТЬ', 'ПД'], 
-                right_on=['КОДНАПР', 'ПУТЬ', 'ПД'], 
-                how='left'
-            ).fillna(0)
+            # 3. Расчет по Линейным участкам (ПД)
+            final_stats = []
+            for pd_id, group in df_eval.groupby("ПД"):
+                p_km = pd_plan_map.get(pd_id, 0)
+                final_stats.append(calculate_nuch_full(f"ПД-{pd_id}", group, "Линейный", p_km))
 
-            summary['ПРОЦЕНТ %'] = (summary['ПРОВЕРЕНО'] / summary['ПЛАН_ДЛИНА'] * 100).round(1)
-            summary['Nуч'] = summary.apply(get_nuch_val, axis=1)
-
-            # --- 4. ИТОГИ ПО ВСЕЙ ДИСТАНЦИИ ---
-            total_plan = summary['ПЛАН_ДЛИНА'].sum()
-            total_fact = summary['ПРОВЕРЕНО'].sum()
-            total_pct = round((total_fact / total_plan * 100), 1) if total_plan > 0 else 0
+            # 4. Расчет Групповых показателей (ПЧЗ и ПЧУ)
+            groups_config = {
+                "ПЧЗ Юг": [1, 2, 3, 4, 5, 12],
+                "ПЧЗ Запад": [6, 7, 8, 9, 10, 11, 13, 14, 15],
+                "ПЧУ-2": [4, 5, 12]
+            }
             
-            avg_nuch = round((summary['Nуч'] * summary['ПРОВЕРЕНО']).sum() / total_fact, 2) if total_fact > 0 else 0
+            for g_name, pds in groups_config.items():
+                g_data = df_eval[df_eval["ПД"].isin(pds)]
+                g_plan = sum([pd_plan_map.get(p, 0) for p in pds])
+                final_stats.append(calculate_nuch_full(g_name, g_data, "Групповой", g_plan))
 
-            # Отображение метрик
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Общая полнота ПЧ", f"{total_pct}%", delta=f"{round(total_fact - total_plan, 2)} км")
-            m2.metric("Средний Nуч по ПЧ", avg_nuch)
-            m3.metric("Проверено км", f"{round(total_fact, 2)} из {round(total_plan, 2)}")
+            results_df = pd.DataFrame(final_stats)
 
-            # --- 5. ТАБЛИЦЫ ---
-            tab1, tab2 = st.tabs(["📍 Детально по участкам", "🏢 Итого по ПД"])
+            # --- ВИЗУАЛИЗАЦИЯ (МЕТРИКИ) ---
+            total_fact = df_eval["ПРОВЕРЕНО"].sum()
+            total_plan = sum(pd_plan_map.values())
+            
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric("Общий Nуч по ПЧ", round(results_df[results_df["Уровень"]=="Групповой"]["Nуч"].mean(), 2))
+            with c2:
+                st.metric("Полнота проверки", f"{round(total_fact/total_plan*100, 1)}%", 
+                          delta=f"{round(total_fact - total_plan, 2)} км")
+            with c3:
+                st.metric("Неудовлетворительные", f"{round(df_eval[df_eval['ОЦЕНКА']==2]['ПРОВЕРЕНО'].sum(), 2)} км")
 
-            with tab1:
-                cols_to_show = ['НАПРАВЛЕНИЕ', 'ПУТЬ', 'ПД', 'ПЛАН_ДЛИНА', 'ПРОВЕРЕНО', 'ПРОЦЕНТ %', 'Nуч']
+            # --- ТАБЛИЦЫ ---
+            t1, t2, t3 = st.tabs(["📋 Итоги Nуч + Полнота", "📈 Графики", "🔍 Детализация"])
+
+            with t1:
+                # Раскрашиваем таблицу
                 st.dataframe(
-                    summary[cols_to_show].style.background_gradient(subset=['ПРОЦЕНТ %'], cmap='RdYlGn', vmin=0, vmax=100),
+                    results_df.style.background_gradient(subset=['Nуч'], cmap='RdYlGn', vmin=3, vmax=5)
+                    .background_gradient(subset=['Полнота %'], cmap='YlOrRd', vmin=80, vmax=100),
                     use_container_width=True
                 )
 
-            with tab2:
-                pd_res = summary.groupby('ПД').agg({
-                    'ПЛАН_ДЛИНА': 'sum',
-                    'ПРОВЕРЕНО': 'sum',
-                    'ОТЛ': 'sum', 'ХОР': 'sum', 'УДОВ': 'sum', 'НЕУД': 'sum'
-                }).reset_index()
-                pd_res['ПОЛНОТА %'] = (pd_res['ПРОВЕРЕНО'] / pd_res['ПЛАН_ДЛИНА'] * 100).round(1)
-                pd_res['Nуч'] = pd_res.apply(get_nuch_val, axis=1)
+            with t2:
+                fig = px.bar(results_df[results_df["Уровень"]=="Линейный"], 
+                             x="Группа", y="Nуч", color="Полнота %", 
+                             title="Качество ПД (цвет - полнота проверки)",
+                             text_auto=True)
+                st.plotly_chart(fig, use_container_width=True)
+
+            with t3:
+                st.write("Сравнение по каждому пути и направлению:")
+                # Группируем факт для детальной сверки
+                path_fact = df_eval.groupby(['КОДНАПР', 'ПУТЬ', 'ПД'])['ПРОВЕРЕНО'].sum().reset_index()
+                path_plan = df_struct.groupby(['НАПРАВЛЕНИЕ', 'ПУТЬ', 'ПД'])['ПЛАН_ДЛИНА'].sum().reset_index()
                 
-                st.dataframe(
-                    pd_res[['ПД', 'ПЛАН_ДЛИНА', 'ПРОВЕРЕНО', 'ПОЛНОТА %', 'Nуч']]
-                    .style.background_gradient(subset=['Nуч'], cmap='RdYlGn', vmin=2, vmax=5),
-                    use_container_width=True
-                )
+                detail_check = path_plan.merge(
+                    path_fact, 
+                    left_on=['НАПРАВЛЕНИЕ','ПУТЬ','ПД'], 
+                    right_on=['КОДНАПР','ПУТЬ','ПД'], 
+                    how='left'
+                ).fillna(0)
+                detail_check['ДЕФИЦИТ'] = detail_check['ПЛАН_ДЛИНА'] - detail_check['ПРОВЕРЕНО']
+                st.dataframe(detail_check.drop(columns=['КОДНАПР']))
 
-        except Exception as e:
-            st.error(f"Ошибка в расчетах: {e}")
-            st.exception(e)
+            # --- ВЫГРУЗКА В EXCEL ---
+            st.sidebar.markdown("---")
+            output = io.BytesIO()
+            with pd.Excel
