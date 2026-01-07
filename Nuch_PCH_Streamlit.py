@@ -6,7 +6,7 @@ import urllib.parse
 
 # --- НАСТРОЙКИ ---
 # ЗАМЕНИТЕ на вашу RAW-ссылку
-URL_STRUCT = "https://raw.githubusercontent.com/ВАШ_ЛОГИН/РЕПО/main/adm_struktur.xlsx"
+URL_STRUCT = "https://github.com/denmalysheff/Nuch/raw/refs/heads/main/adm_struktur.xlsx"
 
 st.set_page_config(page_title="Аналитика ПЧ", layout="wide")
 
@@ -86,3 +86,4 @@ if df_struct is not None:
             st.error(f"Ошибка при обработке файла: {e}")
     else:
         st.info("Пожалуйста, загрузите файл 'Оценка КМ' для начала анализа.")
+
