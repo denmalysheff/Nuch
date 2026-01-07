@@ -5,7 +5,7 @@ import plotly.express as px
 
 # --- НАСТРОЙКИ ---
 # ЗАМЕНИТЕ ЭТУ ССЫЛКУ на прямую ссылку (Raw) из вашего GitHub репозитория
-URL_STRUCT = "https://raw.githubusercontent.com/ВАШ_ЛОГИН/ВАШ_РЕПОЗИТОРИЙ/main/adm_struktur.xlsx"
+URL_STRUCT = "https://github.com/denmalysheff/Nuch/blob/main/adm_struktur.xlsx"
 
 st.set_page_config(page_title="Аналитика Nуч ПЧ", layout="wide")
 
@@ -153,3 +153,4 @@ else:
     st.info("👋 Загрузите файл 'Оценка КМ' для начала анализа.")
 
 st.sidebar.caption("Справочник структуры: подключен (GitHub)")
+
