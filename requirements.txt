@@ -4,3 +4,4 @@ openpyxl
 plotly
 xlsxwriter
 requests
+matplotlib
