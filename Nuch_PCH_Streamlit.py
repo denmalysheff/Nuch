@@ -12,7 +12,6 @@ st.set_page_config(page_title="Аналитика ПЧ-22", layout="wide")
 @st.cache_data
 def load_admin_structure(url):
     try:
-        # Очистка ссылки
         url = url.replace("Nuch/raw/refs", "Nuch/refs")
         parsed_url = list(urllib.parse.urlparse(url))
         parsed_url[2] = urllib.parse.quote(parsed_url[2])
@@ -24,7 +23,6 @@ def load_admin_structure(url):
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
         df.columns = [col.strip().upper() for col in df.columns]
         
-        # Расчет плановой длины из КМНАЧ и КМКОН
         if 'КМКОН' in df.columns and 'КМНАЧ' in df.columns:
             df['ПЛАН_ДЛИНА'] = abs(df['КМКОН'] - df['КМНАЧ'])
         return df
@@ -32,7 +30,15 @@ def load_admin_structure(url):
         st.error(f"❌ Ошибка справочника: {e}")
         return None
 
-st.title("📊 Мониторинг полноты оценки участков")
+def get_nuch_val(row):
+    """Функция расчета Nуч для строки агрегированных данных"""
+    total = row['ПРОВЕРЕНО']
+    if total == 0: return 0
+    # Расчет: (5*отл + 4*хор + 3*удов - 5*неуд) / всего
+    val = (row['ОТЛ']*5 + row['ХОР']*4 + row['УДОВ']*3 - row['НЕУД']*5) / total
+    return round(val, 2)
+
+st.title("📊 Аналитика ПЧ: Полнота и Качество (Nуч)")
 
 df_struct = load_admin_structure(URL_STRUCT)
 
@@ -42,24 +48,33 @@ if df_struct is not None:
     
     if uploaded_file:
         try:
-            # Загружаем факт
             df_eval = pd.read_excel(uploaded_file, sheet_name="Оценка КМ")
             df_eval.columns = [col.strip().upper() for col in df_eval.columns]
 
-            # Группируем ПЛАН (из GitHub) по Направлению, Пути и ПД
-            # Приводим типы к строкам для надежности слияния
+            # --- 1. ПОДГОТОВКА ПЛАНА ---
             df_struct['НАПРАВЛЕНИЕ'] = df_struct['НАПРАВЛЕНИЕ'].astype(str)
             df_struct['ПУТЬ'] = df_struct['ПУТЬ'].astype(str)
-            
             plan_grouped = df_struct.groupby(['НАПРАВЛЕНИЕ', 'ПУТЬ', 'ПД'])['ПЛАН_ДЛИНА'].sum().reset_index()
 
-            # Группируем ФАКТ (из файла) по тем же полям
+            # --- 2. ПОДГОТОВКА ФАКТА И КАЧЕСТВА ---
             df_eval['КОДНАПР'] = df_eval['КОДНАПР'].astype(str)
             df_eval['ПУТЬ'] = df_eval['ПУТЬ'].astype(str)
             
-            fact_grouped = df_eval.groupby(['КОДНАПР', 'ПУТЬ', 'ПД'])['ПРОВЕРЕНО'].sum().reset_index()
+            # Считаем километры по оценкам для каждой группы
+            df_eval['ОТЛ'] = df_eval.apply(lambda r: r['ПРОВЕРЕНО'] if r['ОЦЕНКА'] == 5 else 0, axis=1)
+            df_eval['ХОР'] = df_eval.apply(lambda r: r['ПРОВЕРЕНО'] if r['ОЦЕНКА'] == 4 else 0, axis=1)
+            df_eval['УДОВ'] = df_eval.apply(lambda r: r['ПРОВЕРЕНО'] if r['ОЦЕНКА'] == 3 else 0, axis=1)
+            df_eval['НЕУД'] = df_eval.apply(lambda r: r['ПРОВЕРЕНО'] if r['ОЦЕНКА'] == 2 else 0, axis=1)
 
-            # Слияние по трем условиям: Направление, Путь, ПД
+            fact_grouped = df_eval.groupby(['КОДНАПР', 'ПУТЬ', 'ПД']).agg({
+                'ПРОВЕРЕНО': 'sum',
+                'ОТЛ': 'sum',
+                'ХОР': 'sum',
+                'УДОВ': 'sum',
+                'НЕУД': 'sum'
+            }).reset_index()
+
+            # --- 3. СЛИЯНИЕ ---
             summary = plan_grouped.merge(
                 fact_grouped, 
                 left_on=['НАПРАВЛЕНИЕ', 'ПУТЬ', 'ПД'], 
@@ -68,29 +83,46 @@ if df_struct is not None:
             ).fillna(0)
 
             summary['ПРОЦЕНТ %'] = (summary['ПРОВЕРЕНО'] / summary['ПЛАН_ДЛИНА'] * 100).round(1)
-            
-            # Убираем лишний столбец после слияния
-            if 'КОДНАПР' in summary.columns:
-                summary = summary.drop(columns=['КОДНАПР'])
+            summary['Nуч'] = summary.apply(get_nuch_val, axis=1)
 
-            st.subheader("Детальный отчет по участкам (Направление + Путь + ПД)")
+            # --- 4. ИТОГИ ПО ВСЕЙ ДИСТАНЦИИ ---
+            total_plan = summary['ПЛАН_ДЛИНА'].sum()
+            total_fact = summary['ПРОВЕРЕНО'].sum()
+            total_pct = round((total_fact / total_plan * 100), 1) if total_plan > 0 else 0
             
-            # Безопасное отображение таблицы с градиентом
-            try:
+            avg_nuch = round((summary['Nуч'] * summary['ПРОВЕРЕНО']).sum() / total_fact, 2) if total_fact > 0 else 0
+
+            # Отображение метрик
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Общая полнота ПЧ", f"{total_pct}%", delta=f"{round(total_fact - total_plan, 2)} км")
+            m2.metric("Средний Nуч по ПЧ", avg_nuch)
+            m3.metric("Проверено км", f"{round(total_fact, 2)} из {round(total_plan, 2)}")
+
+            # --- 5. ТАБЛИЦЫ ---
+            tab1, tab2 = st.tabs(["📍 Детально по участкам", "🏢 Итого по ПД"])
+
+            with tab1:
+                cols_to_show = ['НАПРАВЛЕНИЕ', 'ПУТЬ', 'ПД', 'ПЛАН_ДЛИНА', 'ПРОВЕРЕНО', 'ПРОЦЕНТ %', 'Nуч']
                 st.dataframe(
-                    summary.style.background_gradient(subset=['ПРОЦЕНТ %'], cmap='RdYlGn', vmin=0, vmax=100),
+                    summary[cols_to_show].style.background_gradient(subset=['ПРОЦЕНТ %'], cmap='RdYlGn', vmin=0, vmax=100),
                     use_container_width=True
                 )
-            except:
-                # Если matplotlib все еще не виден, выводим простую таблицу
-                st.dataframe(summary, use_container_width=True)
 
-            # Итого по ПД (агрегировано)
-            st.subheader("Итоговая полнота по ПД (все пути)")
-            pd_summary = summary.groupby('ПД')[['ПЛАН_ДЛИНА', 'ПРОВЕРЕНО']].sum().reset_index()
-            pd_summary['ПРОЦЕНТ %'] = (pd_summary['ПРОВЕРЕНО'] / pd_summary['ПЛАН_ДЛИНА'] * 100).round(1)
-            st.table(pd_summary)
+            with tab2:
+                pd_res = summary.groupby('ПД').agg({
+                    'ПЛАН_ДЛИНА': 'sum',
+                    'ПРОВЕРЕНО': 'sum',
+                    'ОТЛ': 'sum', 'ХОР': 'sum', 'УДОВ': 'sum', 'НЕУД': 'sum'
+                }).reset_index()
+                pd_res['ПОЛНОТА %'] = (pd_res['ПРОВЕРЕНО'] / pd_res['ПЛАН_ДЛИНА'] * 100).round(1)
+                pd_res['Nуч'] = pd_res.apply(get_nuch_val, axis=1)
+                
+                st.dataframe(
+                    pd_res[['ПД', 'ПЛАН_ДЛИНА', 'ПРОВЕРЕНО', 'ПОЛНОТА %', 'Nуч']]
+                    .style.background_gradient(subset=['Nуч'], cmap='RdYlGn', vmin=2, vmax=5),
+                    use_container_width=True
+                )
 
         except Exception as e:
-            st.error(f"Ошибка обработки: {e}")
-            st.exception(e) # Позволит увидеть детали ошибки
+            st.error(f"Ошибка в расчетах: {e}")
+            st.exception(e)
