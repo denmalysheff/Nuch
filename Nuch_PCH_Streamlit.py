@@ -60,7 +60,7 @@ def calculate_metrics(group_name, group_data, level, plan_km=0):
     }
 
 # --- ИНТЕРФЕЙС ---
-st.title("📊 Единая система аналитики ПЧ-22")
+st.title("📊 Балловая оценка состояния пути")
 st.markdown("---")
 
 df_struct = load_admin_structure(URL_STRUCT)
@@ -168,3 +168,4 @@ if df_struct is not None:
             st.exception(e)
 else:
     st.info("Ожидание подключения справочника...")
+
